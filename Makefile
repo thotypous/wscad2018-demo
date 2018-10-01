@@ -10,6 +10,7 @@ all: mkKeccakAccel.v
 
 mkKeccakAccel.v: KeccakAccel.bsv $(SRCFILES)
 	bsc $(BSCFLAGS) $(BSCLFLAGS) -u -verilog -p +:$(BSCLIBS) $<
+	cp $@ ./AccelSystem/synthesis/submodules/
 
 clean:
 	$(MAKE) -C keccak-bsv clean

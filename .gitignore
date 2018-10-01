@@ -13,10 +13,11 @@ mk[A-Z]*.v
 *.qdf
 *.qpf
 *.qws
+*.bak
+*~
 /PLLJ_PLLSPE_INFO.txt
 /.qsys_edit
 /db
 /incremental_db
 /output_files
-/de4_pcie.qsf
-/de4_pcie
+/AccelSystem
