@@ -1,5 +1,7 @@
 import BUtils::*;
 import FIFOF::*;
+import GetPut::*;
+import Connectable::*;
 import AccelConfig::*;
 import AvalonSlave::*;
 import AvalonMaster::*;
@@ -19,47 +21,51 @@ endinterface
 
 (* synthesize *)
 module mkKeccakAccel(KeccakAccel);
-	Reg#(Bool) irqFlag <- mkReg(False);
+	FIFOF#(void) irqFifo <- mkFIFOF;
 	AvalonSlave#(PciBarAddrSize, PciBarDataSize) pcibar <- mkAvalonSlave;
 	AvalonMaster#(PciDmaAddrSize, PciDmaDataSize) pcidma <- mkAvalonMaster;
+	FIFOF#(Bit#(PciDmaDataSize)) pcidmaResp <- mkFIFOF;
 
 	let keccak <- mkKeccak;
-	Reg#(Bool) startPermutation <- mkReg(False);
+	FIFOF#(void) pendingPermutation <- mkFIFOF;
 
-	Reg#(LBit#(Rate)) permutCounter <- mkRegU;
+	LBit#(Rate) permutCounterRst = fromInteger(rate - 1);
+	Reg#(LBit#(Rate)) permutCounter <- mkReg(permutCounterRst);
 
 	Reg#(PciDmaAddr) dmaAddr <- mkReg(0);
 	Reg#(PciDmaAddr) dmaStopAddr <- mkReg(0);
-	FIFOF#(PciDmaAddr) dmaReadInFlight <- mkSizedFIFOF(16);
+	FIFOF#(Tuple2#(Bool, PciDmaAddr)) dmaReadInFlight <- mkSizedFIFOF(16);
 
 	function Action startPermutationIfNeeded =
-		when(!startPermutation, action
+		when(!pendingPermutation.notEmpty, action
 			if (permutCounter == 0) begin
-				startPermutation <= True;
-				permutCounter <= fromInteger(rate);
+				pendingPermutation.enq(?);
+				permutCounter <= permutCounterRst;
 			end else begin
 				permutCounter <= permutCounter - 1;
 			end
 		endaction);
 
-	rule do_permutation (startPermutation);
+	mkConnection(pcidma.busServer.response, toPut(pcidmaResp));
+
+	rule do_permutation;
 		keccak.go;
-		startPermutation <= False;
+		pendingPermutation.deq;
 	endrule
 
-	rule getInput (dmaAddr < dmaStopAddr);
+	rule getInput (dmaAddr < dmaStopAddr && !pcidmaResp.notEmpty);
 		pcidma.busServer.request.put(AvalonRequest { command: Read, addr: dmaAddr, data: ? });
-		dmaReadInFlight.enq(dmaAddr);
-		dmaAddr <= dmaAddr + pciDmaWord;
+		let newDmaAddr = dmaAddr + pciDmaWord;
+		dmaReadInFlight.enq(tuple2(newDmaAddr >= dmaStopAddr, dmaAddr));
+		dmaAddr <= newDmaAddr;
 	endrule
 
-	(* preempts = "putOutput, (getInput)" *)
 	rule putOutput;
-		let data <- pcidma.busServer.response.get;
+		let data <- toGet(pcidmaResp).get;
 		let stream <- keccak.squeeze;
-		let addr <- toGet(dmaReadInFlight).get;
-		if (addr == dmaAddr)
-			irqFlag <= True;  // the last one
+		let {last, addr} <- toGet(dmaReadInFlight).get;
+		if (last)
+			irqFifo.enq(?);
 		pcidma.busServer.request.put(AvalonRequest { command: Write, addr: addr, data: data ^ stream });
 		startPermutationIfNeeded;
 	endrule
@@ -74,7 +80,7 @@ module mkKeccakAccel(KeccakAccel);
 			0: // reset
 				action
 					keccak.init;
-					irqFlag <= False;
+					irqFifo.clear;
 					permutCounter <= fromInteger(rate);
 				endaction
 			1: // absorb word (then start permutation if needed)
@@ -93,7 +99,7 @@ module mkKeccakAccel(KeccakAccel);
 				endaction
 			4: // acknowledge IRQ was received
 				action
-					irqFlag <= False;
+					irqFifo.clear;
 				endaction
 			endcase
 		Read:
@@ -108,5 +114,5 @@ module mkKeccakAccel(KeccakAccel);
 
 	interface barWires = pcibar.slaveWires;
 	interface dmaWires = pcidma.masterWires;
-	method ins = irqFlag ? 1 : 0;
+	method ins = irqFifo.notEmpty ? 1 : 0;
 endmodule
